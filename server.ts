@@ -9,6 +9,7 @@ import {
   TelegramNotifier,
   analyzeTranscriptChunk,
   generateForensicAudioComment,
+  transcribeAudioChunk,
 } from './server/coercionEngine.js';
 import {
   addPhoneBinding,
@@ -33,7 +34,7 @@ const telegramNotifier = new TelegramNotifier();
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
 
   const server = http.createServer(app);
@@ -278,6 +279,59 @@ async function startServer() {
       risk_level: payload.system_state.latest_risk,
       counter_guidance: payload.analysis.counter_guidance,
       recorded_in_db: true,
+    });
+  });
+
+  app.post('/api/v1/telephony/audio-chunk', async (req, res) => {
+    const audioBase64 = String(req.body?.audioBase64 ?? '');
+    const mimeType = String(req.body?.mimeType ?? 'audio/webm');
+    const speakerLeg = (String(req.body?.speaker_leg ?? 'CALLER').toUpperCase() || 'CALLER') as SpeakerLeg;
+    const callerNumber = req.body?.caller_number ? String(req.body.caller_number) : '';
+    const receiverPhone = req.body?.receiver_phone ? String(req.body.receiver_phone) : '';
+
+    if (!audioBase64) {
+      res.status(400).json({ error: 'audioBase64 required' });
+      return;
+    }
+
+    if (callerNumber && isCallerBlocked(callerNumber)) {
+      res.json({
+        directive: 'TERMINATE_CALL',
+        blocked: true,
+        reason: 'Caller is blacklisted in Second Voice database.',
+      });
+      return;
+    }
+
+    if (
+      callerNumber &&
+      (activeCallState.caller_number !== callerNumber || activeCallState.bridge_status === 'ENDED')
+    ) {
+      activeCallState.startBridge({
+        caller_number: callerNumber,
+        caller_label: 'Android Call Stream',
+        receiver_phone: receiverPhone || activeCallState.receiver_phone,
+        routing_mode: 'ANDROID_CALL_SCREENING',
+      });
+    }
+
+    const transcript = await transcribeAudioChunk(audioBase64, mimeType);
+    if (!transcript) {
+      res.json({
+        silent: true,
+        directive: activeCallState.highest_phase >= 5 ? 'TERMINATE_CALL' : 'ALLOW',
+      });
+      return;
+    }
+
+    const payload = await processIncomingTranscript(transcript, undefined, speakerLeg);
+    const phase = payload.system_state.current_highest_phase;
+    const directive =
+      phase >= 5 ? 'TERMINATE_CALL' : phase >= 3 ? 'WHISPER_WARNING' : 'ALLOW';
+
+    res.json({
+      ...payload,
+      directive,
     });
   });
 

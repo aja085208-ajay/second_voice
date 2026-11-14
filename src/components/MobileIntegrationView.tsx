@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   Check,
+  Code2,
   Copy,
+  ExternalLink,
   PhoneForwarded,
   Plus,
+  QrCode,
   Send,
   ShieldAlert,
   ShieldBan,
@@ -23,6 +27,7 @@ interface MobileIntegrationViewProps {
     receiver_phone: string;
     routing_mode: 'ANDROID_CALL_SCREENING' | 'CARRIER_FORWARD' | 'TWILIO_RELAY';
   }) => Promise<void>;
+  onOpenMobileMode: () => void;
 }
 
 export function MobileIntegrationView({
@@ -30,6 +35,7 @@ export function MobileIntegrationView({
   reputation,
   onRefreshData,
   onStartSimulatedCall,
+  onOpenMobileMode,
 }: MobileIntegrationViewProps) {
   const [deviceLabel, setDeviceLabel] = useState('');
   const [mobileNumber, setMobileNumber] = useState('');
@@ -41,10 +47,31 @@ export function MobileIntegrationView({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [hookTestResult, setHookTestResult] = useState<string | null>(null);
   const [testingHook, setTestingHook] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [showKotlinSnippet, setShowKotlinSnippet] = useState(false);
 
   const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://your-server.example';
+  const mobileCompanionUrl = `${originUrl}/?mode=mobile`;
   const mobileHookUrl = `${originUrl}/api/v1/telephony/mobile-hook`;
   const twimlUrl = `${originUrl}/api/v1/telephony/twiml`;
+
+  useEffect(() => {
+    QRCode.toDataURL(mobileCompanionUrl, {
+      width: 180,
+      margin: 1,
+      color: {
+        dark: '#0A0F1D',
+        light: '#F8FAFC',
+      },
+    })
+      .then(setQrDataUrl)
+      .catch(() => undefined);
+  }, [mobileCompanionUrl]);
+
+  const kotlinSnippet = `object SecondVoiceConfig {
+    var serverBaseUrl: String = "${originUrl}"
+    var protectedMobileNumber: String = "${phones[0]?.mobile_number ?? '+91 98450 71202'}"
+}`;
 
   const handleCopy = (key: string, value: string) => {
     navigator.clipboard.writeText(value).catch(() => undefined);
@@ -132,6 +159,95 @@ export function MobileIntegrationView({
 
   return (
     <div className="space-y-6">
+      {/* Android Mobile Companion QR Pairing + Native Kotlin Bridge */}
+      <section className="bg-[#131C31] border border-white/10 rounded-xl p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+          <div className="lg:col-span-8 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-semibold text-cyan-400">
+              <QrCode className="w-4 h-4" />
+              <span>Android Mobile Pairing &amp; Live Call Recording Bridge</span>
+            </div>
+            <h2 className="text-lg font-semibold text-white">
+              Connect Your Android Phone in Seconds
+            </h2>
+            <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
+              Scan the QR code in Android Chrome to launch &amp; install the <strong className="text-slate-200">Second Voice Android PWA</strong>. During any speakerphone or Bluetooth call, it runs 0ms keyword spot beeps + hardware vibration and streams rolling 4-second live call audio chunks to the server SQLite database (zero recordings stored on your phone).
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <div className="flex-1 min-w-[220px] flex items-center justify-between gap-2 bg-[#0A0F1D] border border-white/15 rounded-lg px-3 py-2 font-mono text-xs text-slate-200">
+                <span className="truncate">{mobileCompanionUrl}</span>
+                <button
+                  type="button"
+                  onClick={() => handleCopy('mobile-url', mobileCompanionUrl)}
+                  aria-label="Copy Android Mobile URL"
+                  className="text-slate-400 hover:text-white shrink-0"
+                >
+                  {copiedKey === 'mobile-url' ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenMobileMode}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-cyan-400 text-slate-950 text-xs font-semibold hover:bg-cyan-300 transition-colors whitespace-nowrap"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open Android Mobile View
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowKotlinSnippet((v) => !v)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#0A0F1D] border border-white/15 text-xs font-medium text-slate-200 hover:border-cyan-400 transition-colors whitespace-nowrap"
+              >
+                <Code2 className="w-3.5 h-3.5 text-cyan-400" />
+                {showKotlinSnippet ? 'Hide Native Kotlin Config' : 'Native Android Dialer Kotlin'}
+              </button>
+            </div>
+
+            {showKotlinSnippet && (
+              <div className="mt-3 p-4 rounded-lg bg-[#0A0F1D] border border-white/10 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300 font-medium">
+                    Native OS CallScreeningService &amp; Live Call Recorder (<span className="font-mono text-cyan-300">android-companion/SecondVoiceCallBridge.kt</span>)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy('kotlin-cfg', kotlinSnippet)}
+                    className="inline-flex items-center gap-1 text-cyan-400 hover:underline"
+                  >
+                    {copiedKey === 'kotlin-cfg' ? 'Copied' : 'Copy Config'}
+                  </button>
+                </div>
+                <pre className="text-[11px] font-mono text-cyan-200 overflow-x-auto leading-relaxed">
+                  {kotlinSnippet}
+                </pre>
+              </div>
+            )}
+          </div>
+
+          <div className="lg:col-span-4 flex flex-col items-center justify-center bg-[#0A0F1D] border border-white/10 rounded-xl p-4">
+            {qrDataUrl ? (
+              <img
+                src={qrDataUrl}
+                alt="QR code to open Second Voice Android Mobile Companion"
+                className="w-40 h-40 rounded-lg"
+              />
+            ) : (
+              <div className="w-40 h-40 rounded-lg bg-[#131C31] flex items-center justify-center text-xs text-slate-400">
+                Generating QR...
+              </div>
+            )}
+            <span className="mt-2.5 text-[11px] text-slate-400 text-center">
+              Scan on Android Camera → Chrome → Install App
+            </span>
+          </div>
+        </div>
+      </section>
+
       {/* Architecture Explainer Strip */}
       <section className="bg-[#131C31] border border-white/10 rounded-xl p-6">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">

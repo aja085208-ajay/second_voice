@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Bell,
+  BellOff,
   Download,
   FilePlus2,
   Mic,
@@ -20,7 +22,9 @@ import { CoercionRadar } from './CoercionRadar';
 import {
   highlightTranscriptSegments,
   scanCybercrimeTriggers,
+  type TriggerMatch,
 } from '../utils/cybercrimeLexicon';
+import { playSpotAlertBeep, unlockAlertAudio } from '../utils/alertAudio';
 import type {
   PhoneBinding,
   RoutingMode,
@@ -54,16 +58,16 @@ interface ActiveShieldViewProps {
 
 const SAMPLE_PROMPTS = [
   {
-    label: 'OTP & AnyDesk Phish',
-    text: 'Install AnyDesk quick support right now and share your OTP to unblock your KYC.',
+    label: 'Indirect OTP & Refund Trick',
+    text: 'Your electricity will be cut tonight. Just read the 6 digit verification code that came on your SMS and enter your UPI PIN to receive your refund.',
   },
   {
-    label: 'Hinglish Isolation',
+    label: 'Indirect Coercion Pressure',
+    text: 'If you hang up now it proves your guilt. Nobody at home needs to know, stay on the line and act within 5 minutes.',
+  },
+  {
+    label: 'Hinglish Digital Arrest',
     text: 'Main Cyber Crime Cell se DCP bol raha hoon. Kisi ko mat batana aur turant alag room mein door lock kar lo.',
-  },
-  {
-    label: 'Kannada-English Coercion',
-    text: 'Nimma Aadhaar money laundering case alli link aagide. Separate room ge hogi, yargu helbedi, Skype video on maadi.',
   },
   {
     label: 'Genuine Bank Advisory (Safe)',
@@ -90,6 +94,15 @@ interface SpeechRecognitionEventLike {
   }>;
 }
 
+interface SpotAlertState {
+  id: string;
+  phase: number;
+  triggers: TriggerMatch[];
+  utterance: string;
+  beeped: boolean;
+  timestamp: string;
+}
+
 export function ActiveShieldView({
   systemState,
   transcripts,
@@ -107,7 +120,10 @@ export function ActiveShieldView({
   onBridgeAction,
 }: ActiveShieldViewProps) {
   const [inputText, setInputText] = useState('');
-  const [speakerLeg, setSpeakerLeg] = useState<SpeakerLeg>('CALLER');
+  const [speakerLeg, setSpeakerLeg] = useState<SpeakerLeg>('CONVERSATION');
+  const [beepEnabled, setBeepEnabled] = useState(true);
+  const [spotAlert, setSpotAlert] = useState<SpotAlertState | null>(null);
+
   const [showNewCallForm, setShowNewCallForm] = useState(false);
   const [callerNumInput, setCallerNumInput] = useState('+91 93110 44219');
   const [callerLabelInput, setCallerLabelInput] = useState('Unknown Incoming Caller');
@@ -118,29 +134,87 @@ export function ActiveShieldView({
     useState<RoutingMode>('ANDROID_CALL_SCREENING');
 
   const [isMicActive, setIsMicActive] = useState(false);
-  const [micStatus, setMicStatus] = useState<string>('Microphone standby · Zero raw audio saved');
+  const [micStatus, setMicStatus] = useState<string>('Live Call Mic standby · Zero raw audio saved');
   const [interimText, setInterimText] = useState('');
   const [audioLevels, setAudioLevels] = useState<number[]>(Array(18).fill(8));
   const [speechLang, setSpeechLang] = useState<'en-IN' | 'hi-IN' | 'kn-IN'>('en-IN');
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const lastProcessedTxIdRef = useRef<string | null>(null);
+  const lastSpotSignatureRef = useRef<string>('');
+  const interimCommitTimerRef = useRef<number | null>(null);
+  const lastInterimSentRef = useRef<string>('');
 
-  const stopMicCapture = () => {
+  const triggerSpotFeedback = useCallback(
+    (text: string, forcedPhase?: number) => {
+      const matches = scanCybercrimeTriggers(text);
+      const peakPhase = forcedPhase ?? matches.reduce((mx, m) => Math.max(mx, m.phase), 0);
+      if (peakPhase <= 0 && matches.length === 0) return;
+
+      const sig = `${peakPhase}:${matches.map((m) => m.phrase.toLowerCase()).join('|')}`;
+      const isNewSignature = sig !== lastSpotSignatureRef.current;
+
+      let beeped = false;
+      if (beepEnabled && (isNewSignature || forcedPhase !== undefined)) {
+        beeped = playSpotAlertBeep(peakPhase, forcedPhase !== undefined);
+        lastSpotSignatureRef.current = sig;
+      }
+
+      setSpotAlert({
+        id: `spot_${Date.now()}`,
+        phase: peakPhase,
+        triggers: matches,
+        utterance: text,
+        beeped,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    },
+    [beepEnabled]
+  );
+
+  // Fire beep immediately whenever a new analyzed turn arrives from server / WebSocket / Demo
+  useEffect(() => {
+    const latest = transcripts[0];
+    if (!latest || latest.id === lastProcessedTxIdRef.current) return;
+    lastProcessedTxIdRef.current = latest.id;
+
+    if (latest.analysis.detected_phase >= 1) {
+      triggerSpotFeedback(latest.transcript, latest.analysis.detected_phase);
+    }
+  }, [transcripts, triggerSpotFeedback]);
+
+  const stopMicCapture = useCallback(() => {
     setIsMicActive(false);
     setInterimText('');
-    setMicStatus('Microphone standby · Zero raw audio saved');
+    setMicStatus('Live Call Mic standby · Zero raw audio saved');
     setAudioLevels(Array(18).fill(8));
 
+    if (interimCommitTimerRef.current) {
+      window.clearTimeout(interimCommitTimerRef.current);
+      interimCommitTimerRef.current = null;
+    }
+
     if (recognitionRef.current) {
+      const rec = recognitionRef.current;
+      recognitionRef.current = null;
       try {
-        recognitionRef.current.stop();
+        rec.stop();
       } catch {
         // ignore
       }
-      recognitionRef.current = null;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+      mediaRecorderRef.current = null;
     }
 
     if (animFrameRef.current) {
@@ -157,21 +231,64 @@ export function ActiveShieldView({
       audioCtxRef.current.close().catch(() => undefined);
       audioCtxRef.current = null;
     }
-  };
+  }, []);
 
   useEffect(() => {
     return () => stopMicCapture();
-  }, []);
+  }, [stopMicCapture]);
+
+  const startMediaRecorderFallback = (stream: MediaStream) => {
+    if (typeof MediaRecorder === 'undefined') {
+      setMicStatus('Audio meter active · Type or use quick triggers below');
+      return;
+    }
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = async (ev) => {
+      if (!ev.data || ev.data.size < 1000) return;
+      const buf = await ev.data.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const audioBase64 = btoa(binary);
+
+      try {
+        await fetch('/api/v1/telephony/audio-chunk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64,
+            mimeType: ev.data.type || 'audio/webm',
+            speaker_leg: speakerLeg,
+          }),
+        });
+      } catch {
+        // ignore transient chunk error
+      }
+    };
+
+    recorder.start(3500);
+    setMicStatus('Listening via Gemini Audio Stream (3.5s chunks) · Speak into mic');
+  };
 
   const startMicCapture = async () => {
+    unlockAlertAudio();
+    lastSpotSignatureRef.current = '';
+
     const win = window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionInstance;
       webkitSpeechRecognition?: new () => SpeechRecognitionInstance;
     };
     const SpeechRec = win.SpeechRecognition || win.webkitSpeechRecognition;
 
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioStreamRef.current = stream;
       const ctx = new AudioContext();
       audioCtxRef.current = ctx;
@@ -192,13 +309,13 @@ export function ActiveShieldView({
       };
       updateBars();
     } catch {
-      setMicStatus('Live mic unavailable in browser · Use transcript input or demo controls');
-      if (!SpeechRec) return;
+      setMicStatus('Microphone permission blocked · Type live call dialogue below for instant beep & AI scan');
+      return;
     }
 
     if (!SpeechRec) {
       setIsMicActive(true);
-      setMicStatus('Audio meter active (SpeechRecognition API unsupported in this browser)');
+      if (stream) startMediaRecorderFallback(stream);
       return;
     }
 
@@ -213,17 +330,49 @@ export function ActiveShieldView({
         const res = event.results[i];
         const phrase = res[0]?.transcript ?? '';
         if (res.isFinal && phrase.trim()) {
+          const finalPhrase = phrase.trim();
           setInterimText('');
-          onAnalyzeText(phrase.trim(), speakerLeg);
+          if (interimCommitTimerRef.current) {
+            window.clearTimeout(interimCommitTimerRef.current);
+            interimCommitTimerRef.current = null;
+          }
+          if (finalPhrase !== lastInterimSentRef.current) {
+            lastInterimSentRef.current = finalPhrase;
+            triggerSpotFeedback(finalPhrase);
+            onAnalyzeText(finalPhrase, speakerLeg);
+          }
         } else {
           interim += phrase;
         }
       }
-      if (interim) setInterimText(interim);
+
+      if (interim.trim()) {
+        const cleanInterim = interim.trim();
+        setInterimText(cleanInterim);
+
+        // ZERO-LATENCY SPOT DETECTION & BEEP while caller is still speaking!
+        triggerSpotFeedback(cleanInterim);
+
+        // Auto-commit interim phrase if speaker pauses for 1.3s
+        if (interimCommitTimerRef.current) {
+          window.clearTimeout(interimCommitTimerRef.current);
+        }
+        interimCommitTimerRef.current = window.setTimeout(() => {
+          if (cleanInterim && cleanInterim !== lastInterimSentRef.current) {
+            lastInterimSentRef.current = cleanInterim;
+            onAnalyzeText(cleanInterim, speakerLeg);
+            setInterimText('');
+          }
+        }, 1300);
+      }
     };
 
     recognition.onerror = (ev) => {
-      setMicStatus(`Speech capture notice: ${ev.error}`);
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+        if (stream) startMediaRecorderFallback(stream);
+      } else {
+        setMicStatus(`Live speech capture notice: ${ev.error}`);
+      }
     };
 
     recognition.onend = () => {
@@ -240,21 +389,41 @@ export function ActiveShieldView({
       recognition.start();
       recognitionRef.current = recognition;
       setIsMicActive(true);
-      setMicStatus(`Listening live (${speechLang}) · Leg: ${speakerLeg}`);
+      setMicStatus(`LIVE CALL ACTIVE (${speechLang}) · Instant Beep & AI Guard Armed`);
     } catch {
-      stopMicCapture();
+      if (stream) {
+        setIsMicActive(true);
+        startMediaRecorderFallback(stream);
+      } else {
+        stopMicCapture();
+      }
+    }
+  };
+
+  // Instant on-the-spot check as user types during a live call
+  const handleInputChange = (value: string) => {
+    setInputText(value);
+    unlockAlertAudio();
+    if (value.trim().length >= 3) {
+      triggerSpotFeedback(value);
+    } else {
+      lastSpotSignatureRef.current = '';
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    unlockAlertAudio();
     const trimmed = inputText.trim();
     if (!trimmed) return;
     setInputText('');
+    triggerSpotFeedback(trimmed);
     await onAnalyzeText(trimmed, speakerLeg);
   };
 
   const handleWhisperReceiver = async () => {
+    unlockAlertAudio();
+    if (beepEnabled) playSpotAlertBeep(5, true);
     await onBridgeAction('WHISPER_ALERT');
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -275,12 +444,12 @@ export function ActiveShieldView({
       routing_mode: routingModeInput,
     });
     setShowNewCallForm(false);
+    setSpotAlert(null);
+    lastSpotSignatureRef.current = '';
   };
 
-  // Chronological conversation trajectory (oldest -> newest)
   const chronologicalTurns = useMemo(() => [...transcripts].reverse(), [transcripts]);
 
-  // Aggregate triggered cybercrime lexicon hits across the active call
   const triggerLedger = useMemo(() => {
     const map = new Map<string, { phrase: string; category: string; phase: number; count: number }>();
     for (const t of transcripts) {
@@ -334,6 +503,34 @@ export function ActiveShieldView({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={() => {
+                unlockAlertAudio();
+                const next = !beepEnabled;
+                setBeepEnabled(next);
+                if (next) playSpotAlertBeep(3, true);
+              }}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap ${
+                beepEnabled
+                  ? 'bg-cyan-500/10 border-cyan-400/40 text-cyan-200 hover:bg-cyan-500/20'
+                  : 'bg-[#0A0F1D] border-white/15 text-slate-400 hover:text-white'
+              }`}
+            >
+              {beepEnabled ? <Bell className="w-3.5 h-3.5 text-cyan-400" /> : <BellOff className="w-3.5 h-3.5" />}
+              {beepEnabled ? 'Spot Beep: ON' : 'Spot Beep: Muted'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                unlockAlertAudio();
+                playSpotAlertBeep(5, true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0A0F1D] border border-white/15 text-xs font-medium text-slate-200 hover:border-cyan-400 transition-colors whitespace-nowrap"
+            >
+              <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+              Test Beep
+            </button>
+            <button
+              type="button"
               onClick={() => setShowNewCallForm((v) => !v)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0A0F1D] border border-white/15 text-xs font-medium text-slate-200 hover:border-cyan-400 transition-colors whitespace-nowrap"
             >
@@ -347,7 +544,7 @@ export function ActiveShieldView({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-400/40 text-xs font-medium text-amber-200 hover:bg-amber-500/25 disabled:opacity-40 transition-colors whitespace-nowrap"
             >
               <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-              Whisper Alert to Receiver
+              Whisper Alert
             </button>
             <button
               type="button"
@@ -356,7 +553,7 @@ export function ActiveShieldView({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/40 text-xs font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-40 transition-colors whitespace-nowrap"
             >
               <PhoneOff className="w-3.5 h-3.5 text-rose-400" />
-              {isSevered ? 'Bridge Severed' : 'Sever Call & Block'}
+              {isSevered ? 'Bridge Severed' : 'Sever & Block'}
             </button>
           </div>
         </div>
@@ -467,6 +664,45 @@ export function ActiveShieldView({
         )}
       </section>
 
+      {/* Instant Spot Beep & Live Trigger Flash Banner (0ms Local Detection) */}
+      {spotAlert && (
+        <div
+          role="status"
+          className={`rounded-xl border px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+            spotAlert.phase >= 5
+              ? 'bg-rose-950/60 border-rose-500 text-rose-100'
+              : 'bg-amber-950/50 border-amber-400/70 text-amber-100'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <Bell className="w-5 h-5 shrink-0 mt-0.5 text-amber-300" />
+            <div>
+              <div className="text-xs font-mono font-semibold">
+                ON-THE-SPOT DETECTION ({spotAlert.timestamp}) · PHASE {spotAlert.phase}/7 ·{' '}
+                {spotAlert.beeped ? 'AUDIO BEEP ALERT FIRED' : 'VISUAL ALERT'}
+              </div>
+              <div className="text-sm font-medium mt-0.5">
+                {spotAlert.triggers.length > 0
+                  ? `${spotAlert.triggers[0].label} — "${spotAlert.triggers.map((t) => t.phrase).join('", "')}"`
+                  : 'Coercive escalation pattern detected'}
+              </div>
+              {spotAlert.triggers[0]?.plainAdvice && (
+                <div className="text-xs text-white/90 mt-1">
+                  {spotAlert.triggers[0].plainAdvice}
+                </div>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSpotAlert(null)}
+            className="text-xs font-medium underline opacity-80 hover:opacity-100 self-end sm:self-center shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Phase 5+ Isolation Circuit Breaker Banner */}
       {isCritical && (
         <div
@@ -535,7 +771,11 @@ export function ActiveShieldView({
               </div>
               <button
                 type="button"
-                onClick={onResetSession}
+                onClick={() => {
+                  setSpotAlert(null);
+                  lastSpotSignatureRef.current = '';
+                  onResetSession();
+                }}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-xs font-medium text-slate-300 hover:text-white hover:bg-white/5 transition-colors whitespace-nowrap shrink-0"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
@@ -659,16 +899,16 @@ export function ActiveShieldView({
           </div>
         </section>
 
-        {/* Right Column: Live Audio / Transcript Interception & Stream */}
+        {/* Right Column: Live Call Audio / Transcript Input & Stream */}
         <section className="xl:col-span-7 bg-[#131C31] border border-white/10 rounded-xl p-6 flex flex-col justify-between">
           <div>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
               <div>
                 <h2 className="text-lg font-semibold text-white">
-                  Live Call Leg Capture &amp; Cybercrime Trigger Engine
+                  Live Call Input &amp; Instant Beep Detector
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Captures English, Hindi &amp; Kannada code-mixing · Persists every turn to server database
+                  Speak live or type during a call — triggers beep at 0ms on the spot &amp; logs to SQLite DB
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -685,20 +925,26 @@ export function ActiveShieldView({
                 <button
                   type="button"
                   onClick={isMicActive ? stopMicCapture : startMicCapture}
-                  className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                     isMicActive
                       ? 'bg-rose-500 text-white hover:bg-rose-400'
                       : 'bg-cyan-400 text-slate-950 hover:bg-cyan-300'
                   }`}
                 >
                   {isMicActive ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
-                  {isMicActive ? 'Stop Mic Shield' : 'Start Live Mic'}
+                  {isMicActive ? 'Stop Live Call Mic' : 'Start Live Call Mic'}
                 </button>
               </div>
             </div>
 
-            {/* Live Waveform Bar Visualizer */}
-            <div className="bg-[#0A0F1D] border border-white/10 rounded-lg px-4 py-3 mb-4 flex items-center justify-between gap-4">
+            {/* Live Waveform Bar Visualizer + Instant Interim Transcript */}
+            <div
+              className={`border rounded-lg px-4 py-3 mb-4 flex items-center justify-between gap-4 transition-colors ${
+                isMicActive
+                  ? 'bg-cyan-950/25 border-cyan-400/50'
+                  : 'bg-[#0A0F1D] border-white/10'
+              }`}
+            >
               <div className="flex items-end gap-1 h-10" aria-hidden="true">
                 {audioLevels.map((lvl, idx) => (
                   <div
@@ -715,20 +961,24 @@ export function ActiveShieldView({
                 ))}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-xs text-slate-300 truncate">{micStatus}</div>
-                {interimText && (
+                <div className="text-xs text-slate-200 font-medium truncate">{micStatus}</div>
+                {interimText ? (
                   <div className="text-xs font-mono text-cyan-300 truncate mt-0.5">
-                    Listening: &ldquo;{interimText}&rdquo;
+                    Live Voice: &ldquo;{interimText}&rdquo;
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                    Put caller on speakerphone or speak directly — interim words trigger beep immediately
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Speaker Leg Selector + Transcript Input Form */}
+            {/* Speaker Leg Selector + Live Typing Input (Beeps on the spot while typing too!) */}
             <form onSubmit={handleSubmit} className="space-y-2.5 mb-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1 p-1 bg-[#0A0F1D] border border-white/10 rounded-lg">
-                  {(['CALLER', 'RECEIVER'] as const).map((leg) => (
+                  {(['CONVERSATION', 'CALLER', 'RECEIVER'] as const).map((leg) => (
                     <button
                       key={leg}
                       type="button"
@@ -739,12 +989,16 @@ export function ActiveShieldView({
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
-                      {leg === 'CALLER' ? 'Caller Leg (Incoming)' : 'Receiver Leg (Your Phone)'}
+                      {leg === 'CONVERSATION'
+                        ? 'Full Call (Both)'
+                        : leg === 'CALLER'
+                        ? 'Caller Leg'
+                        : 'Receiver Leg'}
                     </button>
                   ))}
                 </div>
                 <span className="text-[11px] text-slate-400">
-                  Evaluated via Gemini 4 Hydrogen + Cybercrime Lexicon
+                  Instant 0ms Spot Beep + Gemini 4 Hydrogen Deep Analysis
                 </span>
               </div>
 
@@ -752,12 +1006,12 @@ export function ActiveShieldView({
                 <input
                   type="text"
                   value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
+                  onChange={(e) => handleInputChange(e.target.value)}
                   disabled={isSevered}
                   placeholder={
                     isSevered
                       ? 'Call bridge severed by shield — click Reset Bridge or New Bridged Call'
-                      : 'Enter dialogue from either call leg (e.g., "Install AnyDesk and share OTP")'
+                      : 'Type or speak live call words here (beeps at the spot on trigger keywords)...'
                   }
                   className="flex-1 bg-[#0A0F1D] border border-white/15 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-400 disabled:opacity-50"
                 />
@@ -767,7 +1021,7 @@ export function ActiveShieldView({
                   className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-cyan-400 text-slate-950 text-sm font-semibold hover:bg-cyan-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
                 >
                   <Send className="w-4 h-4" />
-                  {isAnalyzing ? 'Analyzing...' : 'Analyze Turn'}
+                  {isAnalyzing ? 'Analyzing...' : 'Log & Analyze'}
                 </button>
               </div>
             </form>
@@ -777,7 +1031,10 @@ export function ActiveShieldView({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={onAdvanceDemoStep}
+                  onClick={() => {
+                    unlockAlertAudio();
+                    onAdvanceDemoStep();
+                  }}
                   disabled={isAnalyzing || isSevered}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-white/10 text-xs font-medium text-slate-100 hover:bg-slate-700 disabled:opacity-50 transition-colors whitespace-nowrap"
                 >
@@ -786,7 +1043,10 @@ export function ActiveShieldView({
                 </button>
                 <button
                   type="button"
-                  onClick={onTriggerPhase5}
+                  onClick={() => {
+                    unlockAlertAudio();
+                    onTriggerPhase5();
+                  }}
                   disabled={isAnalyzing}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/40 text-xs font-medium text-rose-200 hover:bg-rose-500/25 transition-colors whitespace-nowrap"
                 >
@@ -822,7 +1082,11 @@ export function ActiveShieldView({
                   key={preset.label}
                   type="button"
                   disabled={isAnalyzing || isSevered}
-                  onClick={() => onAnalyzeText(preset.text, 'CALLER')}
+                  onClick={() => {
+                    unlockAlertAudio();
+                    triggerSpotFeedback(preset.text);
+                    onAnalyzeText(preset.text, 'CALLER');
+                  }}
                   className="px-2.5 py-1 rounded-md bg-[#0A0F1D] border border-white/10 text-xs text-slate-300 hover:text-white hover:border-cyan-400/50 disabled:opacity-50 transition-colors whitespace-nowrap"
                 >
                   {preset.label}
@@ -842,10 +1106,10 @@ export function ActiveShieldView({
               <div className="flex-1 flex flex-col items-center justify-center text-center py-8 border border-dashed border-white/10 rounded-lg">
                 <ShieldCheck className="w-7 h-7 text-cyan-400 mb-2" />
                 <p className="text-sm font-medium text-slate-200">
-                  Call Proxy Active — Awaiting Conversation Turns
+                  Live Call Shield Ready — Click &ldquo;Start Live Call Mic&rdquo;
                 </p>
                 <p className="text-xs text-slate-400 mt-1 max-w-md">
-                  Speak into the mic, type an utterance, or click &ldquo;Next Scam Escalation Step&rdquo; to trace every cybercrime keyword and escalation jump in real time.
+                  Speak into the microphone or type caller words above. The shield beeps on the spot the moment any cybercrime or coercion keyword appears.
                 </p>
               </div>
             ) : (

@@ -14,7 +14,7 @@ export type BridgeStatus =
   | 'TERMINATED_BY_SHIELD'
   | 'ENDED';
 
-export type SpeakerLeg = 'CALLER' | 'RECEIVER' | 'PROXY_WHISPER';
+export type SpeakerLeg = 'CALLER' | 'RECEIVER' | 'CONVERSATION' | 'PROXY_WHISPER';
 
 export interface PhaseDefinition {
   phase: number;

@@ -18,24 +18,26 @@ import type {
 import { scanCybercrimeTriggers } from '../src/utils/cybercrimeLexicon.js';
 
 const COERCION_STATE_MACHINE_PROMPT = `
-You are 'Second Voice', a behavioral analysis AI designed to detect 'Digital Arrest', cybercrime phishing, remote-access scams, and financial coercion in real-time.
-Analyze the following transcript chunk in the context of the ongoing conversation trajectory. The speaker may use English, Hindi, or Kannada (including Romanized code-mixing like "Aadhaar link aagide", "arrest warrant idhe", "kisi ko mat batana", "police station se bol raha hoon", "OTP batao").
+You are 'Second Voice', a real-time protective AI that listens to phone calls to protect everyday citizens from cybercrime, OTP theft, scams, and psychological coercion.
+Analyze the following transcript chunk in the context of the ongoing conversation (English, Hindi, Kannada, or Hinglish/Kanglish code-mixing).
 
-Evaluate the conversation against these 7 Scam Phases:
+Evaluate BOTH DIRECT and INDIRECT/DISGUISED attempts across these 7 Escalation Phases:
 0 - Normal/Safe
-1 - Hook (Unexpected contact from 'authorities', TRAI, KYC expiry, or courier/delivery service)
-2 - Authority Impersonation (Fake Police, CBI, ED, Customs, RBI, Supreme Court, Cyber Crime Cell)
-3 - Accusation (Claims of illegal parcels, money laundering, narcotics, compromised Aadhaar/bank accounts)
-4 - Intimidation (Threats of Digital Arrest, FIR, non-bailable warrant, asset freeze, sextortion/blackmail)
-5 - Isolation ("Tell no one", "Go to a separate room", "Lock the door", "Do not cut the call", secrecy order)
-6 - Forced Surveillance & Cyber Access (Demand to turn on Skype/WhatsApp video, install AnyDesk/TeamViewer/RustDesk/APK, share screen, or disclose OTP/PIN/CVV)
-7 - Financial Coercion (Demand for RTGS/IMPS/UPI transfer to a 'secret' RBI or verification escrow account, UPI collect approval, FD liquidation, gift cards, or crypto)
+1 - Hook: Unexpected courier/parcel, KYC expiry, lottery/reward, or fake utility/SIM/electricity/bank disconnection ("power will be cut tonight", "SIM blocked in 2 hours")
+2 - Authority Impersonation: Claiming to be Police, CBI, ED, Customs, RBI, Supreme Court, TRAI, or Cyber Crime Cell
+3 - Accusation: False claims of money laundering, narcotics, compromised Aadhaar/PAN, or criminal fraud
+4 - Intimidation & Indirect Coercion: Direct threats ("Digital Arrest", warrant, bank freeze) OR indirect psychological pressure ("if you hang up it proves guilt", "final warning — decide in 5 minutes", "accidental UPI transfer — send it back", fake family emergency)
+5 - Isolation & Secrecy: Direct or indirect orders to cut off support ("tell no one", "nobody at home needs to know", "keep this between us", "protect your family reputation", "go to a separate room", "lock your door", "do not cut the call")
+6 - Direct & Indirect OTP / Surveillance / Remote Access:
+    - Direct OTP/PIN/AnyDesk/TeamViewer/APK/Skype/WhatsApp video requests
+    - INDIRECT OTP/Code fishing: asking for a "4-digit or 6-digit verification code", "cancellation code", "refund code", "reference number that just arrived by SMS", "read what came in your message box", "ek code aaya hoga batao", or telling the victim to "enter your UPI PIN to receive a refund/cashback"
+7 - Financial Coercion & Refund Tricks: Demanding RTGS/IMPS/UPI transfer to a "secret/RBI escrow/verification account", small fee to unlock a prize/refund, UPI collect approval, or FD liquidation
 
 CRITICAL RULES:
-1. Conversation Trajectory Tracking: Track how benign or hook-stage dialogue escalates toward coercion; a calm tone does NOT mean safe if previous coercion phases were hit.
-2. Trigger Extraction: Extract EVERY cybercrime, phishing, isolation, or coercion keyword/phrase present in the utterance.
-3. False Positives: Distinguish between genuine bank fraud advisories (safe — genuine banks ask you to call the official number on your card and never ask for OTP, screen share, transfers, or secrecy) and coercive scams.
-4. Provide actionable 1-sentence counter-guidance for the victim in plain language.
+1. Catch subtle/indirect phrasing just as strictly as direct keywords. Even polite or friendly requests for an SMS code, cancellation number, or PIN to receive money are Phase 6 CRITICAL scams.
+2. Conversation Trajectory Tracking: Never downgrade below priorHighestPhase if the conversation is escalating.
+3. False Positives: Distinguish genuine bank advisories ("If you did not make this spend, call the number on your card" — safe) from scam requests.
+4. Write 'counter_guidance' in warm, simple everyday words for a common person (e.g., "Never read any 4 or 6 digit SMS code, even if they call it a verification or refund code. Hang up now.").
 `;
 
 export const MOCK_SCAM_SEQUENCE: Array<{ transcript: string; analysis: Omit<TranscriptAnalysis, 'engine_source'> }> = [
@@ -140,11 +142,12 @@ export function checkOfflineRules(text: string): TranscriptAnalysis {
     engine_source: 'offline-regex',
     detected_language: 'Auto (Lexicon)',
     counter_guidance:
-      highestMatchedPhase >= 5
-        ? 'Isolation or financial extortion breach detected. Disconnect immediately and call a trusted family member.'
+      matches[0]?.plainAdvice ??
+      (highestMatchedPhase >= 5
+        ? 'Hang up right now. Never share codes, install apps, or send money—call your family or dial 1930.'
         : highestMatchedPhase >= 1
-        ? 'Cybercrime indicator detected. Verify caller independently via helpline 1930 before complying.'
-        : 'Conversation currently matches safe baseline patterns.',
+        ? 'Be careful—this sounds like a scam trick. Hang up and check via official numbers or 1930.'
+        : 'Call looks normal so far. Keep Second Voice running while you talk.'),
   };
 }
 
@@ -638,5 +641,36 @@ export async function generateForensicAudioComment(metrics: {
     return (response.text ?? fallback).trim();
   } catch {
     return fallback;
+  }
+}
+
+export async function transcribeAudioChunk(
+  base64Audio: string,
+  mimeType: string
+): Promise<string> {
+  const ai = getGeminiClient();
+  if (!ai || !base64Audio) return '';
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: base64Audio,
+            },
+          },
+          {
+            text: 'Transcribe the spoken words verbatim (English, Hindi, or Kannada). If silence or noise only, return an empty string.',
+          },
+        ],
+      },
+    });
+    return (response.text ?? '').trim();
+  } catch (err) {
+    console.warn('[AudioTranscribe] Failed to transcribe chunk:', err);
+    return '';
   }
 }

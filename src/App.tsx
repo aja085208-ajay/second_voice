@@ -9,6 +9,7 @@ import {
   Shield,
   ShieldAlert,
   ShieldCheck,
+  Smartphone,
   X,
 } from 'lucide-react';
 import { ActiveShieldView } from './components/ActiveShieldView';
@@ -17,7 +18,10 @@ import { VerificationHubView } from './components/VerificationHubView';
 import { TelegramSetupView } from './components/TelegramSetupView';
 import { ReportHistoryView } from './components/ReportHistoryView';
 import { MobileIntegrationView } from './components/MobileIntegrationView';
+import { AndroidMobileCompanion } from './components/AndroidMobileCompanion';
 import { FloatingOverlayHud } from './components/FloatingOverlayHud';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { buildIncidentFromActiveState, downloadIncidentPdf } from './utils/pdfReport';
 import type {
@@ -64,6 +68,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('shield');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showFloatingHud, setShowFloatingHud] = useState(true);
+  const [isMobileCompanionMode, setIsMobileCompanionMode] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('mode') === 'mobile';
+  });
 
   const [systemState, setSystemState] = useState<StateSnapshot>(INITIAL_STATE);
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
@@ -375,7 +383,39 @@ export default function App() {
     }
   };
 
+  const enterMobileCompanionMode = () => {
+    setIsMobileCompanionMode(true);
+    const url = new URL(window.location.href);
+    url.searchParams.set('mode', 'mobile');
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const exitMobileCompanionMode = () => {
+    setIsMobileCompanionMode(false);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('mode');
+    window.history.replaceState({}, '', url.toString());
+  };
+
   const activeNavLabel = NAV_ITEMS.find((n) => n.id === activeTab)?.label ?? 'Active Shield';
+
+  if (isMobileCompanionMode) {
+    return (
+      <ErrorBoundary>
+        <AndroidMobileCompanion
+          systemState={systemState}
+          transcripts={transcripts}
+          wsConnected={wsConnected}
+          isAnalyzing={isAnalyzing}
+          onAnalyzeText={handleAnalyzeText}
+          onBridgeAction={handleBridgeAction}
+          onResetSession={handleResetSession}
+          onExitMobileMode={exitMobileCompanionMode}
+        />
+        <OfflineIndicator />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <ErrorBoundary>
@@ -509,7 +549,16 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3 shrink-0">
+            <div className="flex items-center gap-2.5 shrink-0">
+              <PWAInstallButton compact />
+              <button
+                type="button"
+                onClick={enterMobileCompanionMode}
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#131C31] border border-white/15 text-xs font-medium text-slate-200 hover:border-cyan-400 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
+                Android Mobile View
+              </button>
               <button
                 type="button"
                 onClick={handleTriggerPhase5}
@@ -565,6 +614,7 @@ export default function App() {
                 reputation={reputation}
                 onRefreshData={fetchDatabaseTables}
                 onStartSimulatedCall={handleStartBridge}
+                onOpenMobileMode={enterMobileCompanionMode}
               />
             )}
 
@@ -600,6 +650,7 @@ export default function App() {
             onDismiss={() => setShowFloatingHud(false)}
           />
         )}
+        <OfflineIndicator />
       </div>
     </ErrorBoundary>
   );

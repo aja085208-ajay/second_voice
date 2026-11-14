@@ -76,6 +76,14 @@ Second Voice Colossus acts as an intelligent server-side call interception proxy
 - `POST /api/v1/telephony/mobile-hook` — Mobile dialer hook returning `ALLOW` / `WHISPER_WARNING` / `TERMINATE_CALL`
 - `POST /api/v1/demo/trigger-isolation` — Stage demo Phase 5 Circuit Breaker trigger
 - `GET  /api/v1/incidents` — Fetch centralized SQLite call session records
+- `POST /api/v1/telephony/audio-chunk` — Receive live 4s call-recording chunks from Android PWA or native Kotlin service, transcribe via `gemini-3.5-transcribe`, and score coercion
+
+---
+
+## Android Mobile & Live Call Recording Integration
+
+1. **Installable Android PWA (`/?mode=mobile`)**: Open **Mobile & Call Bridge** in the web console and scan the QR code from your Android phone to install **SecondVoice**. Runs 0ms spot beeps + hardware vibration (`navigator.vibrate`) and streams rolling 4-second live call audio chunks to the server SQLite database.
+2. **Native Android Call Companion (`/android-companion/`)**: Includes `SecondVoiceCallBridge.kt` (`CallScreeningService` + `LiveCallAudioBridgeService` foreground audio streamer) and `AndroidManifest.xml` for direct OS-level dialer call interception and automatic live recording chunk upload.
 
 ---
 
